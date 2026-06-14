@@ -36,6 +36,8 @@ compatibility: "Requires Python 3 with venv support. llm-wiki bootstraps its own
 - `网页 / 公众号 URL` 导入由 `llm-wiki` 内部直接完成网页抓取、正文提取和 Markdown 转换
 - 对用户来说，不再需要额外安装其他 companion skill
 - 调用入口改为使用当前 Python 解释器运行 `scripts/llm-wiki`
+- `bootstrap` 会安装 Markdown / 网页 / PDF / DOCX / XLSX / XLS / PPTX 对应依赖，并在默认包索引失败后自动回退到可配置镜像或官方 PyPI
+- `doctor` 会按能力维度检查当前运行环境，不再只看顶层模块能否 import
 - 如需显式预热运行环境，可执行：
 
 ```bash
@@ -48,6 +50,13 @@ compatibility: "Requires Python 3 with venv support. llm-wiki bootstraps its own
 markitdown
 beautifulsoup4
 markdownify
+mammoth
+pdfminer-six
+pdfplumber
+openpyxl
+pandas
+python-pptx
+xlrd
 ```
 
 ## 何时使用这个 skill
@@ -121,6 +130,7 @@ markdownify
 - 初始化后，应明确告诉用户知识库创建在哪个目录
 - 转换后，应说明生成了哪个 Markdown 文件，或直接返回转换后的 Markdown 内容
 - 导入后，应说明导入了什么资料，生成了哪些页面
+- 如果导入失败且原因是格式依赖不完整，应明确指出缺少的是哪一类转换能力，而不是只返回底层异常
 - 回答类任务后，应说明引用了哪些知识页，并尽量附上证据摘录，同时指出哪些结论置信度更高或需要复核
 - 纠错沉淀后，应说明创建或更新了哪个页面，以及它纠正了什么错误
 - 查询或沉淀后，应说明写入了哪个页面，或引用了哪些知识页

@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 import rebuild_index
 from bs4 import BeautifulSoup
 from markdownify import markdownify as md
+from runtime_capabilities import missing_dependency_message, missing_modules_for_source
 from utils import (
     append_log,
     classify_raw_dir,
@@ -399,7 +400,14 @@ def humanize_name(value: str) -> str:
     return value.replace("-", " ").replace("_", " ").strip().title()
 
 
+def ensure_local_source_dependencies(source_path: Path) -> None:
+    missing = missing_modules_for_source(source_path)
+    if missing:
+        raise SystemExit(missing_dependency_message(source_path, missing))
+
+
 def convert_with_markitdown(source_path: Path) -> str:
+    ensure_local_source_dependencies(source_path)
     try:
         from markitdown import MarkItDown
     except Exception as exc:

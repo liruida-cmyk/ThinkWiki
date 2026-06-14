@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import argparse
-import importlib
 import sys
 from pathlib import Path
+
+from runtime_capabilities import CAPABILITY_LABELS, CAPABILITY_ORDER, runtime_report
 
 ROOT_REQUIRED_FILES = [
     "SKILL.md",
@@ -27,6 +28,7 @@ ROOT_REQUIRED_SCRIPTS = [
     "scripts/build_graph.py",
     "scripts/build_viewer.py",
     "scripts/doctor.py",
+    "scripts/runtime_capabilities.py",
     "scripts/utils.py",
 ]
 ROOT_REQUIRED_TEMPLATES = [
@@ -54,13 +56,6 @@ WIKI_REQUIRED_PATHS = [
     "wiki",
     "output",
 ]
-RUNTIME_MODULES = {
-    "markitdown": "office document conversion",
-    "bs4": "webpage parsing",
-    "markdownify": "HTML to Markdown conversion",
-}
-
-
 def check_root_skill_package(repo_root: Path, errors: list[str]) -> None:
     for relative_path in ROOT_REQUIRED_FILES:
         target = repo_root / relative_path
@@ -81,15 +76,23 @@ def check_wiki_workspace(wiki_root: Path | None, errors: list[str]) -> None:
             errors.append(f"[missing-wiki-asset] {target}")
 
 
-def check_runtime_dependencies(errors: list[str]) -> None:
-    for module_name, capability in RUNTIME_MODULES.items():
-        try:
-            importlib.import_module(module_name)
-        except Exception as exc:
+def check_runtime_dependencies(errors: list[str]) -> list[str]:
+    lines: list[str] = []
+    report = runtime_report()
+    for capability in CAPABILITY_ORDER:
+        missing = report[capability]
+        label = CAPABILITY_LABELS[capability]
+        if not missing:
+            lines.append(f"- {label}: ready")
+            continue
+        modules = ", ".join(item["module"] for item in missing)
+        lines.append(f"- {label}: missing {modules}")
+        for item in missing:
             errors.append(
-                f"[missing-runtime-dependency] Python module `{module_name}` is unavailable "
-                f"for {capability}: {exc}"
+                f"[missing-runtime-dependency] {label} requires Python module `{item['module']}` "
+                f"for {item['purpose']}: {item['reason']}"
             )
+    return lines
 
 
 def main() -> int:
@@ -104,7 +107,7 @@ def main() -> int:
     errors: list[str] = []
     check_root_skill_package(repo_root, errors)
     check_wiki_workspace(wiki_root, errors)
-    check_runtime_dependencies(errors)
+    capability_lines = check_runtime_dependencies(errors)
 
     lines = [
         "# Runtime Doctor Report",
@@ -112,6 +115,10 @@ def main() -> int:
         f"- Repo Root: {repo_root}",
         f"- Python: {Path(sys.executable).resolve()}",
         f"- Issues: {len(errors)}",
+        "",
+        "## Capability Status",
+        "",
+        *capability_lines,
         "",
     ]
     if errors:

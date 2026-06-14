@@ -144,10 +144,24 @@ cd llm-wiki
 - `markitdown`
 - `beautifulsoup4`
 - `markdownify`
+- `mammoth`
+- `pdfminer-six`
+- `pdfplumber`
+- `openpyxl`
+- `pandas`
+- `python-pptx`
+- `xlrd`
 
 根目录 `requirements.txt` 是运行时自举的正式依赖声明，`bootstrap_runtime.py` 会直接读取它来安装本 skill 所需的 Python 运行库。
 
 这些运行库现在作为 `llm-wiki` 自身实现的一部分使用，不再要求用户安装额外 skill，也不要求用户手动 `pip install`。
+
+`bootstrap` 现在会尝试安装完整的 Markdown / 网页 / 办公文档转换依赖，并在默认包索引失败后自动回退到可配置镜像或官方 PyPI。
+如果你所在环境需要指定镜像，可以设置：
+
+```bash
+export LLM_WIKI_PIP_INDEX_URL="https://pypi.org/simple"
+```
 
 如果你想显式预热运行环境，可执行：
 
@@ -156,6 +170,7 @@ cd llm-wiki
 ```
 
 如果你直接运行 `init / ingest / ask / digest / crystallize` 等命令，`llm-wiki` 也会先自动尝试完成这一步。
+如果某一类办公文档依赖没有安装完整，`ingest` 会给出格式级错误提示，例如 `PDF import dependencies are not ready`。
 
 ## 实现要点
 
@@ -167,6 +182,7 @@ cd llm-wiki
 - 网页转换由 Python 抓取、`BeautifulSoup` 和 `markdownify` 完成
 - `ask`、`digest`、`crystallize` 尽量保留来源与证据片段
 - 当前支持 macOS、Linux、Windows，不要求 `bash` 作为唯一入口
+- `doctor` 会按能力维度检查运行时是否具备 `Web / PDF / DOCX / XLSX / XLS / PPTX` 导入能力
 
 ## 快速开始
 
@@ -264,6 +280,26 @@ cd llm-wiki
 3. 用 `ask` 做基于证据的回答
 4. 对高价值结果再调用 `query / digest / crystallize`
 5. 定期运行 `lint` 和 `doctor`
+
+## 运行体检
+
+建议在首次安装或更换运行环境后执行：
+
+```bash
+<python-command> scripts/llm-wiki doctor --repo-root .
+```
+
+`doctor` 会输出以下能力状态：
+
+- `Core runtime`
+- `Web import`
+- `PDF import`
+- `DOCX import`
+- `XLSX import`
+- `XLS import`
+- `PPTX import`
+
+如果某一项显示 `missing ...`，说明对应格式尚不可用，需要重新执行 `bootstrap` 或检查包索引/网络环境。
 
 ## License
 
