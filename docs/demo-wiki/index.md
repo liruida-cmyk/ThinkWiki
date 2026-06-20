@@ -1,1 +1,1 @@
-# Demo Wiki
+# ThinkWiki Demo Wiki

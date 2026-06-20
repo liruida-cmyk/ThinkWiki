@@ -8,7 +8,7 @@ from pathlib import Path
 
 ROOT_FILES = {
     ".wiki-schema.md": "# marker\n",
-    "index.md": "# Demo Wiki\n",
+    "index.md": "# ThinkWiki Demo Wiki\n",
     "overview.md": "# Overview\n\nThis demo wiki powers the README screenshots.\n",
     "purpose.md": "# Purpose\n\nShow real viewer and graph outputs for ThinkWiki.\n",
     "log.md": "# Log\n",

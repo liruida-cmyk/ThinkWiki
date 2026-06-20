@@ -1,6 +1,21 @@
 # ThinkWiki
 
+[![Release](https://img.shields.io/github/v/release/wzdavid/ThinkWiki?sort=semver)](https://github.com/wzdavid/ThinkWiki/releases)
+[![License](https://img.shields.io/github/license/wzdavid/ThinkWiki)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3-blue.svg)](https://www.python.org/)
+
 `ThinkWiki` 是一个符合 Agent Skills 规范的本地 Markdown 知识库 skill。它帮助 Agent 持续整理、沉淀、查询和可视化你的知识库，而不是每次都从原始资料重新推导。
+
+它适合这样的场景：
+
+- 你想把 PDF、网页、笔记和对话持续沉淀成可复用的本地知识库
+- 你希望 Agent 不只是“一次问答”，而是持续产出 `query / synthesis / decision / concept`
+- 你需要可以直接打开的浏览页和知识图谱，而不是只得到 JSON 或终端输出
+- 你希望整个能力仍然以一个简单的 skill 交付，而不是额外拼很多安装步骤
+
+一句话理解：
+
+- `ThinkWiki = 本地 Markdown 知识库 + Agent Skill 原生入口 + 可直接打开的 Viewer / Graph 成果页`
 
 ## 效果预览
 
@@ -10,6 +25,7 @@
 - 浏览页：适合按页面类型、状态、置信度浏览整个 wiki
 - 图谱页：适合查看页面之间的引用、包含和链接关系
 - 这三张图都来自仓库内 `docs/demo-wiki` 的真实输出，而不是手工绘制的示意图
+- 如需重新生成 README 截图，可执行：`python3 scripts/capture_readme_screenshots.py`
 
 ### 成果入口页样例
 
