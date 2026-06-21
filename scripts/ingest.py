@@ -4,15 +4,17 @@ from __future__ import annotations
 import argparse
 import gzip
 import html as html_lib
+import json
 import os
 import re
 import shutil
+import time
 import zlib
 from datetime import datetime
 from pathlib import Path
 from urllib import error as urllib_error
 from urllib import request as urllib_request
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import rebuild_index
 from bs4 import BeautifulSoup
@@ -428,7 +430,7 @@ def convert_with_markitdown(source_path: Path) -> str:
     return clean_markdown(str(content))
 
 
-def fetch_raw_html(url: str) -> str:
+def fetch_raw_html(url: str, timeout: int = 30) -> str:
     request = urllib_request.Request(
         url,
         headers={
@@ -437,7 +439,7 @@ def fetch_raw_html(url: str) -> str:
         },
     )
     try:
-        with urllib_request.urlopen(request, timeout=30) as response:
+        with urllib_request.urlopen(request, timeout=timeout) as response:
             raw_bytes = response.read()
             content_encoding = (response.headers.get("Content-Encoding") or "").lower()
             if "gzip" in content_encoding:
@@ -458,6 +460,17 @@ def detect_wechat(url: str, soup: BeautifulSoup) -> bool:
     if "mp.weixin.qq.com" in url:
         return True
     return soup.select_one("#js_content") is not None
+
+
+def resolve_web_adapter(url: str, soup: BeautifulSoup, requested: str = "auto") -> str:
+    normalized = requested.strip().lower() or "auto"
+    if normalized not in {"auto", "wechat", "generic"}:
+        raise SystemExit(f"Unsupported web adapter: {requested}")
+    if normalized != "auto":
+        return normalized
+    if detect_wechat(url, soup):
+        return "wechat"
+    return "generic"
 
 
 def find_meta_content(soup: BeautifulSoup, key: str, attr: str = "name") -> str:
@@ -544,6 +557,62 @@ def normalize_images(content_node: BeautifulSoup) -> None:
             img["alt"] = clean_text(alt)
 
 
+def collect_media_urls(content_node: BeautifulSoup, base_url: str) -> list[str]:
+    urls: list[str] = []
+    seen: set[str] = set()
+    for img in content_node.select("img"):
+        src = clean_text(str(img.get("src", "") or ""))
+        if not src:
+            continue
+        absolute = urljoin(base_url, src)
+        img["src"] = absolute
+        if absolute in seen:
+            continue
+        seen.add(absolute)
+        urls.append(absolute)
+    return urls
+
+
+def normalize_wechat_code_blocks(content_node: BeautifulSoup) -> None:
+    selectors = (
+        ".js_code_area",
+        ".code-snippet__js",
+        ".code-snippet",
+        "pre[data-lang]",
+        "pre[data-language]",
+    )
+    seen: set[int] = set()
+    for selector in selectors:
+        for node in content_node.select(selector):
+            marker = id(node)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            code_node = node.select_one("code") or node.select_one("pre") or node
+            code_text = code_node.get_text("\n", strip=False)
+            if not clean_text(code_text):
+                continue
+            language = (
+                node.get("data-lang")
+                or node.get("data-language")
+                or code_node.get("data-lang")
+                or code_node.get("data-language")
+                or ""
+            )
+            classes = list(node.get("class", [])) + list(code_node.get("class", []))
+            for class_name in classes:
+                if class_name.startswith("language-"):
+                    language = class_name.split("-", 1)[1]
+                    break
+            pre = content_node.new_tag("pre")
+            code = content_node.new_tag("code")
+            if language:
+                code["class"] = [f"language-{language.strip().lower()}"]
+            code.string = code_text.strip("\n")
+            pre.append(code)
+            node.replace_with(pre)
+
+
 def remove_noise(content_node: BeautifulSoup) -> None:
     for selector in REMOVE_SELECTORS:
         for node in content_node.select(selector):
@@ -568,21 +637,133 @@ def build_web_header(title: str, site_name: str, author: str, publish_date: str,
     return "\n".join(lines)
 
 
-def fetch_webpage_as_markdown(url: str, title_override: str = "") -> tuple[str, str]:
-    raw_html = fetch_raw_html(url)
-    if not raw_html.strip():
-        raise SystemExit(f"Failed to fetch webpage HTML for {url}")
+def capture_ready(markdown: str) -> bool:
+    blocks = cleaned_content_blocks(markdown)
+    body = plain_text("\n".join(body_lines(markdown)))
+    if len(body) >= 160:
+        return True
+    if len(body) >= 80 and len(blocks) >= 2:
+        return True
+    return False
+
+
+def analyze_capture_reason(
+    *,
+    markdown: str,
+    title: str,
+    site_name: str,
+    author: str,
+    publish_date: str,
+) -> tuple[str, str]:
+    body = plain_text("\n".join(body_lines(markdown))).lower()
+    blocks = cleaned_content_blocks(markdown)
+    if any(marker in body for marker in ("loading", "加载中", "please wait", "稍后再试")):
+        return "loading_placeholder", "页面内容看起来仍像加载占位，建议稍后重试或改用 wait 模式。"
+    if len(body) < 40:
+        return "body_too_short", "正文过短，建议优先人工检查页面是否真的完成加载。"
+    if len(blocks) < 2 and len(body) < 120:
+        return "sparse_structure", "正文结构较稀疏，建议复核是否抓到了真正的主内容区域。"
+    meta_hits = sum(1 for value in (title, site_name, author, publish_date) if str(value).strip())
+    if meta_hits <= 1:
+        return "metadata_sparse", "来源元数据较少，建议核对标题、作者和发布时间。"
+    return "ready", "采集结果结构完整，可继续复核后正式 ingest。"
+
+
+def build_capture_result(
+    *,
+    url: str,
+    raw_html: str,
+    title_override: str,
+    adapter: str,
+) -> dict[str, str]:
     soup = BeautifulSoup(raw_html, "html.parser")
-    if detect_wechat(url, soup):
+    resolved_adapter = resolve_web_adapter(url, soup, adapter)
+    if resolved_adapter == "wechat":
         title, author, site_name, publish_date, content_node = extract_wechat_metadata(soup, raw_html, url)
     else:
         title, author, site_name, publish_date, content_node = extract_generic_metadata(soup, url)
     if title_override.strip():
         title = title_override.strip()
     remove_noise(content_node)
+    if resolved_adapter == "wechat":
+        normalize_wechat_code_blocks(content_node)
     normalize_images(content_node)
+    media_urls = collect_media_urls(content_node, url)
     markdown = html_to_markdown(content_node)
-    return build_web_header(title, site_name, author, publish_date, url) + markdown, raw_html
+    capture_state = "ok" if capture_ready(markdown) else "needs_review"
+    capture_reason, review_hint = analyze_capture_reason(
+        markdown=markdown,
+        title=title,
+        site_name=site_name,
+        author=author,
+        publish_date=publish_date,
+    )
+    return {
+        "adapter": resolved_adapter,
+        "title": title,
+        "author": author,
+        "site_name": site_name,
+        "publish_date": publish_date,
+        "url": url,
+        "markdown": build_web_header(title, site_name, author, publish_date, url) + markdown,
+        "raw_html": raw_html,
+        "capture_state": capture_state,
+        "capture_reason": capture_reason,
+        "review_hint": review_hint,
+        "media_urls": json.dumps(media_urls, ensure_ascii=False),
+    }
+
+
+def fetch_webpage_capture(
+    url: str,
+    title_override: str = "",
+    adapter: str = "auto",
+    mode: str = "auto",
+    wait_seconds: int = 8,
+) -> dict[str, str]:
+    normalized_mode = mode.strip().lower() or "auto"
+    if normalized_mode not in {"auto", "wait"}:
+        raise SystemExit(f"Unsupported capture mode: {mode}")
+
+    started = time.time()
+    attempts = 0
+    last_capture: dict[str, str] | None = None
+    deadline = started + max(wait_seconds, 0)
+    while True:
+        attempts += 1
+        raw_html = fetch_raw_html(url)
+        if raw_html.strip():
+            last_capture = build_capture_result(
+                url=url,
+                raw_html=raw_html,
+                title_override=title_override,
+                adapter=adapter,
+            )
+            if normalized_mode == "auto" or str(last_capture.get("capture_state", "")) == "ok":
+                break
+        if normalized_mode != "wait" or time.time() >= deadline:
+            break
+        time.sleep(1.0)
+
+    if last_capture is None:
+        raise SystemExit(f"Failed to fetch webpage HTML for {url}")
+    elapsed = max(0.0, time.time() - started)
+    final_state = str(last_capture.get("capture_state", "") or "needs_review")
+    if normalized_mode == "wait":
+        if final_state == "ok" and attempts > 1:
+            final_state = "wait_completed"
+        elif final_state != "ok":
+            final_state = "wait_timeout"
+    last_capture["capture_state"] = final_state
+    last_capture["capture_mode"] = normalized_mode
+    last_capture["capture_attempts"] = str(attempts)
+    last_capture["capture_elapsed_seconds"] = "{:.1f}".format(elapsed)
+    return last_capture
+
+
+def fetch_webpage_as_markdown(url: str, title_override: str = "") -> tuple[str, str]:
+    capture = fetch_webpage_capture(url, title_override)
+    return capture["markdown"], capture["raw_html"]
 
 
 def normalize_local_source(source_path: Path) -> str:

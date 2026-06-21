@@ -21,17 +21,22 @@
 
 ## 效果预览
 
-下面这三张样例图展示了 `ThinkWiki` 生成后的三个核心成果页：
+下面这四张样例图展示了 `ThinkWiki` 生成后的四个核心成果页：
 
 - 知识工作台首页：用户最容易直接打开的统一入口，也会展示当前 wiki 的页面规模、最近变化、图谱状态和下一步建议
+- Inbox Review 页：按 `ready / review / weak` 分组复核采集内容，并直接复制下一步 ingest 命令
 - 浏览页：适合按页面类型、状态、置信度浏览整个 wiki
 - 图谱页：适合查看页面之间的引用、包含和链接关系，也会直接给出图谱洞察和补链建议
-- 这三张图都来自仓库内 `docs/demo-wiki` 的真实输出，而不是手工绘制的示意图
+- 这四张图都来自仓库内 `docs/demo-wiki` 的真实输出，而不是手工绘制的示意图
 - 如需重新生成 README 截图，可执行：`python3 scripts/capture_readme_screenshots.py`
 
 ### 成果入口页样例
 
 ![ThinkWiki Output Hub Preview](docs/assets/output-hub-preview.png)
+
+### Inbox Review 页样例
+
+![ThinkWiki Inbox Preview](docs/assets/inbox-preview.png)
 
 ### 浏览页样例
 
@@ -230,6 +235,9 @@ cd ThinkWiki
 ```bash
 <python-command> scripts/thinkwiki clip --root <wiki-root> --source <source-file>
 <python-command> scripts/thinkwiki clip --root <wiki-root> --url "https://example.com/article"
+<python-command> scripts/thinkwiki clip --root <wiki-root> --url "https://mp.weixin.qq.com/s/xxxxx" --adapter wechat
+<python-command> scripts/thinkwiki clip --root <wiki-root> --url "https://example.com/article" --mode wait --wait-seconds 8
+<python-command> scripts/thinkwiki clip --root <wiki-root> --url "https://example.com/article" --media always
 <python-command> scripts/thinkwiki clip --root <wiki-root> --title "Quick Note" --text "# Quick Note\n\nSomething worth saving."
 ```
 
@@ -237,6 +245,51 @@ cd ThinkWiki
 
 - `raw/inbox/`：保留原始文件、网页 HTML 或原始文本
 - `normalized/inbox/`：保存清洗后的 Markdown，方便后续复核和正式 ingest
+
+对于网页采集，`ThinkWiki` 还会额外写入：
+
+- `normalized/inbox/*.json`：保存结构化网页元数据，例如 `adapter`、`siteName`、`author`、`publishDate` 和 `url`
+- `output/inbox/index.html` 中的质量状态：`ready / review / weak`，帮助你快速判断哪些条目可以直接继续 ingest
+- `output/inbox/index.html` 中的采集状态：例如 `ok / needs_review / wait_completed / wait_timeout`
+- `output/inbox/index.html` 中的媒体状态：例如 `review_needed / localized / kept_remote`
+- `output/inbox/index.html` 中的采集原因：例如 `loading_placeholder / body_too_short / metadata_sparse`
+
+如果你已经知道来源站点类型，也可以显式指定：
+
+```bash
+<python-command> scripts/thinkwiki clip --root <wiki-root> --url "https://mp.weixin.qq.com/s/xxxxx" --adapter wechat
+<python-command> scripts/thinkwiki clip --root <wiki-root> --url "https://example.com/article" --adapter generic
+```
+
+如果网页正文出现得比较慢，或者第一次抓到的内容还像加载占位页，也可以切到等待模式：
+
+```bash
+<python-command> scripts/thinkwiki clip --root <wiki-root> --url "https://example.com/article" --mode wait --wait-seconds 8
+```
+
+`wait` 模式会在一个短时间窗口里轮询抓取页面，并把最终状态记录到 inbox metadata 里：
+
+- `wait_completed`：等待后抓到了更完整的正文
+- `wait_timeout`：等待已结束，但正文仍不够稳定，建议人工复核
+
+除了状态，`ThinkWiki` 还会给网页采集写入更细的原因提示，例如：
+
+- `loading_placeholder`：页面内容看起来还像加载占位
+- `body_too_short`：正文过短，可能没抓到完整文章
+- `sparse_structure`：抓到的结构过于稀疏，可能只是页头或摘要
+- `metadata_sparse`：标题、作者、来源、发布时间等元数据过少
+
+网页图片的处理策略也可以直接指定：
+
+```bash
+<python-command> scripts/thinkwiki clip --root <wiki-root> --url "https://example.com/article" --media ask
+<python-command> scripts/thinkwiki clip --root <wiki-root> --url "https://example.com/article" --media always
+<python-command> scripts/thinkwiki clip --root <wiki-root> --url "https://example.com/article" --media never
+```
+
+- `ask`：先保留远程图片链接，并在 inbox review 中标记为后续复核
+- `always`：直接下载图片到 `normalized/assets/inbox/...`，并把 Markdown 引用改写成本地相对路径
+- `never`：保留远程图片链接，不做本地化
 
 执行后，命令会直接打印下一步建议，例如：
 
@@ -256,8 +309,13 @@ python scripts/thinkwiki ingest --root <wiki-root> --source normalized/inbox/202
 
 - `output/inbox/index.html`：集中查看最近 clip 进来的条目
 - 每条条目都带有清洗后的 Markdown 打开入口
+- 网页条目会显示 `adapter / source / author / publish date` 等结构化元数据
+- 网页条目会显示当前提取质量状态，并给出一条简短的复核建议
+- 网页条目支持直接打开 sidecar metadata JSON，方便复核提取质量
 - 每条条目都会直接显示下一步 `ingest` 命令，方便复制执行
 - 工作台首页 `output/index.html` 也会同步刷新
+
+对于微信公众号等技术文章，`ThinkWiki` 还会在网页转 Markdown 前先规范化常见的代码块容器，尽量保留更自然的代码内容，避免在 inbox review 阶段就丢失可读性。
 
 ### 只做转换，不入库
 

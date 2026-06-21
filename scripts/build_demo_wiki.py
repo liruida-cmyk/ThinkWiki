@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import textwrap
 from pathlib import Path
 
@@ -22,6 +23,31 @@ RAW_FILES = {
 
 INBOX_FILES = {
     "team-retrospective": "# Team Retrospective\n\nCollect this note in inbox first, then decide whether it should become a source page.\n",
+}
+
+INBOX_METADATA = {
+    "2026-06-20-team-retrospective.json": {
+        "kind": "web",
+        "adapter": "wechat",
+        "title": "Team Retrospective",
+        "siteName": "ThinkWiki Channel",
+        "author": "ThinkWiki Team",
+        "publishDate": "2026-06-20 10:00:00",
+        "url": "https://mp.weixin.qq.com/s/thinkwiki-demo",
+        "captureMode": "wait",
+        "captureState": "wait_completed",
+        "captureReason": "ready",
+        "reviewHint": "采集结果结构完整，可继续复核后正式 ingest。",
+        "captureAttempts": 2,
+        "captureElapsedSeconds": 1.2,
+        "mediaPolicy": "always",
+        "mediaStatus": "localized",
+        "mediaCount": 1,
+        "localizedMediaCount": 1,
+        "mediaDir": "normalized/assets/inbox/2026-06-20-team-retrospective",
+        "normalizedPath": "normalized/inbox/2026-06-20-team-retrospective.md",
+        "rawPath": "raw/inbox/2026-06-20-team-retrospective.md",
+    },
 }
 
 WIKI_FILES = {
@@ -351,6 +377,7 @@ def build_demo(root: Path) -> None:
         "raw/articles",
         "raw/inbox",
         "normalized/articles",
+        "normalized/assets/inbox/2026-06-20-team-retrospective",
         "normalized/inbox",
         "output/inbox",
         "output/graph",
@@ -368,6 +395,13 @@ def build_demo(root: Path) -> None:
     for slug, content in INBOX_FILES.items():
         write_text(root / "raw" / "inbox" / f"2026-06-20-{slug}.md", content)
         write_text(root / "normalized" / "inbox" / f"2026-06-20-{slug}.md", content)
+
+    for relative, payload in INBOX_METADATA.items():
+        write_text(root / "normalized" / "inbox" / relative, json.dumps(payload, ensure_ascii=False, indent=2))
+    write_text(
+        root / "normalized" / "assets" / "inbox" / "2026-06-20-team-retrospective" / "cover.txt",
+        "placeholder localized media asset",
+    )
 
     for relative, content in WIKI_FILES.items():
         write_text(root / relative, content)

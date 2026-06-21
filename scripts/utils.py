@@ -190,6 +190,63 @@ def _humanize_label(value: str) -> str:
     return text or value or "Untitled"
 
 
+def _inbox_quality(item: dict) -> tuple[str, str]:
+    kind = str(item.get("kind", "") or "")
+    adapter = str(item.get("adapter", "") or "")
+    summary = str(item.get("summary", "") or "").strip()
+    title = str(item.get("title", "") or "").strip()
+    site_name = str(item.get("site_name", "") or "").strip()
+    source_url = str(item.get("source_url", "") or "").strip()
+    author = str(item.get("author", "") or "").strip()
+    publish_date = str(item.get("publish_date", "") or "").strip()
+
+    score = 0
+    if title and len(title) >= 4:
+        score += 1
+    if summary and summary not in {"(no summary)", "(no summary yet)"} and len(summary) >= 24:
+        score += 2
+    if source_url:
+        score += 1
+    if site_name:
+        score += 1
+    if author:
+        score += 1
+    if publish_date:
+        score += 1
+    if adapter == "wechat":
+        score += 1
+    if kind == "web" and not source_url:
+        score -= 2
+
+    if score >= 5:
+        return "ready", "网页元数据较完整，适合继续复核后正式 ingest。"
+    if score >= 3:
+        return "review", "内容已可读，但建议先核对来源、作者或发布时间。"
+    return "weak", "提取信息偏少，建议优先人工检查正文质量和来源信息。"
+
+
+def _capture_state_reason(state: str) -> str:
+    if state == "wait_completed":
+        return "等待模式下已抓到更完整正文。"
+    if state == "wait_timeout":
+        return "等待模式已结束，但正文仍不够稳定，建议人工复核。"
+    if state == "needs_review":
+        return "本次采集已完成，但正文完整度一般。"
+    return "采集状态正常。"
+
+
+def _capture_reason_hint(reason: str, fallback: str) -> str:
+    if reason == "loading_placeholder":
+        return "页面仍像加载占位，建议稍后重试，或用 wait 模式重新抓取。"
+    if reason == "body_too_short":
+        return "正文太短，建议先人工确认这是不是完整文章页。"
+    if reason == "sparse_structure":
+        return "正文结构偏稀疏，可能只抓到了摘要或页头区域。"
+    if reason == "metadata_sparse":
+        return "作者、来源或发布时间信息不足，建议人工补核。"
+    return fallback or "采集结果结构完整。"
+
+
 def collect_inbox_items(root: Path) -> list[dict]:
     inbox_dir = root / "normalized" / "inbox"
     if not inbox_dir.exists():
@@ -207,6 +264,8 @@ def collect_inbox_items(root: Path) -> list[dict]:
         text = read_text(path)
         meta, body = parse_frontmatter(text)
         repo_path = path.relative_to(root).as_posix()
+        sidecar_path = path.with_suffix(".json")
+        sidecar = _load_json(sidecar_path)
         title = (
             _first_markdown_heading(path)
             or str(meta.get("title", "") or "").strip()
@@ -217,6 +276,20 @@ def collect_inbox_items(root: Path) -> list[dict]:
             updated = datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
         except OSError:
             updated = "n/a"
+        quality_status, quality_reason = _inbox_quality({
+            "kind": str(sidecar.get("kind", "") or ""),
+            "adapter": str(sidecar.get("adapter", "") or ""),
+            "summary": summary,
+            "title": title,
+            "site_name": str(sidecar.get("siteName", "") or ""),
+            "source_url": str(sidecar.get("url", "") or ""),
+            "author": str(sidecar.get("author", "") or ""),
+            "publish_date": str(sidecar.get("publishDate", "") or ""),
+        })
+        capture_state = str(sidecar.get("captureState", "") or "")
+        capture_mode = str(sidecar.get("captureMode", "") or "")
+        capture_reason = str(sidecar.get("captureReason", "") or "")
+        review_hint = str(sidecar.get("reviewHint", "") or "")
         items.append({
             "title": title,
             "summary": summary,
@@ -224,13 +297,62 @@ def collect_inbox_items(root: Path) -> list[dict]:
             "path": repo_path,
             "href": Path(os.path.relpath(path, start=root / "output")).as_posix(),
             "ingest_command": f"python scripts/thinkwiki ingest --root {root} --source {repo_path}",
+            "kind": str(sidecar.get("kind", "") or ""),
+            "adapter": str(sidecar.get("adapter", "") or ""),
+            "site_name": str(sidecar.get("siteName", "") or ""),
+            "author": str(sidecar.get("author", "") or ""),
+            "publish_date": str(sidecar.get("publishDate", "") or ""),
+            "source_url": str(sidecar.get("url", "") or ""),
+            "metadata_path": sidecar_path.relative_to(root).as_posix() if sidecar_path.exists() else "",
+            "capture_state": capture_state,
+            "capture_mode": capture_mode,
+            "capture_attempts": int(sidecar.get("captureAttempts", 0) or 0),
+            "capture_elapsed_seconds": sidecar.get("captureElapsedSeconds", ""),
+            "capture_state_reason": _capture_state_reason(capture_state),
+            "capture_reason": capture_reason,
+            "review_hint": _capture_reason_hint(capture_reason, review_hint),
+            "media_policy": str(sidecar.get("mediaPolicy", "") or ""),
+            "media_status": str(sidecar.get("mediaStatus", "") or ""),
+            "media_count": int(sidecar.get("mediaCount", 0) or 0),
+            "localized_media_count": int(sidecar.get("localizedMediaCount", 0) or 0),
+            "media_dir": str(sidecar.get("mediaDir", "") or ""),
+            "quality_status": quality_status,
+            "quality_reason": quality_reason,
         })
     return items
 
 
-def _recent_inbox_items(root: Path, limit: int = 4) -> tuple[int, list[dict]]:
-    items = collect_inbox_items(root)
-    return len(items), items[:limit]
+def _inbox_groups(items: list[dict]) -> dict[str, list[dict]]:
+    groups: dict[str, list[dict]] = {"ready": [], "review": [], "weak": [], "other": []}
+    for item in items:
+        status = str(item.get("quality_status", "") or "")
+        if status not in groups:
+            status = "other"
+        groups[status].append(item)
+    return groups
+
+
+def _inbox_quality_summary(items: list[dict]) -> dict[str, int]:
+    groups = _inbox_groups(items)
+    return {key: len(value) for key, value in groups.items()}
+
+
+def _priority_inbox_items(items: list[dict], limit: int = 3) -> list[dict]:
+    groups = _inbox_groups(items)
+    ranked: list[dict] = []
+    for status in ["ready", "review", "weak", "other"]:
+        ranked.extend(groups.get(status, []))
+    return ranked[:limit]
+
+
+def _render_command_list(commands: list[str], empty_text: str) -> str:
+    if not commands:
+        return "<div class='empty small'>{}</div>".format(escape(empty_text))
+    rows = [
+        "<pre class='command-pre'>{}</pre>".format(escape(command))
+        for command in commands
+    ]
+    return "\n".join(rows)
 
 
 def _render_page_list(items: list[dict], empty_text: str) -> str:
@@ -302,21 +424,203 @@ def _render_inbox_list(items: list[dict], empty_text: str) -> str:
         return "<div class='empty small'>{}</div>".format(escape(empty_text))
     cards: list[str] = []
     for item in items:
+        kind = str(item.get("kind", "") or "")
+        adapter = str(item.get("adapter", "") or "")
+        mini_type = adapter or kind or "inbox"
+        detail_parts = [
+            str(item.get("site_name", "") or ""),
+            str(item.get("author", "") or ""),
+        ]
+        detail_text = " · ".join(part for part in detail_parts if part)
+        detail_html = "<span>{}</span>".format(escape(detail_text)) if detail_text else ""
+        quality_status = str(item.get("quality_status", "") or "")
+        quality_html = ""
+        if quality_status:
+            quality_html = "<span class='quality quality-{status}'>{label}</span>".format(
+                status=escape(quality_status),
+                label=escape(f"quality: {quality_status}"),
+            )
+        capture_state = str(item.get("capture_state", "") or "")
+        capture_html = ""
+        if capture_state:
+            capture_html = "<span class='quality quality-{status}'>{label}</span>".format(
+                status=escape(capture_state),
+                label=escape(f"capture: {capture_state}"),
+            )
+        capture_reason = str(item.get("capture_reason", "") or "")
+        reason_html = ""
+        if capture_reason and capture_reason != "ready":
+            reason_html = "<span class='quality quality-media'>{label}</span>".format(
+                label=escape(f"reason: {capture_reason}"),
+            )
+        media_status = str(item.get("media_status", "") or "")
+        media_html = ""
+        if media_status:
+            media_html = "<span class='quality quality-media'>{label}</span>".format(
+                label=escape(f"media: {media_status}"),
+            )
         cards.append(
             "<a class='mini-card' href='{href}' target='_blank' rel='noopener'>"
-            "<div class='mini-meta'><span class='mini-type'>inbox</span><span>{updated}</span></div>"
+            "<div class='mini-meta'><span class='mini-type'>{mini_type}</span><span>{updated}</span></div>"
             "<strong>{title}</strong>"
             "<span>{summary}</span>"
+            "{detail_html}"
+            "{quality_html}"
+            "{capture_html}"
+            "{reason_html}"
+            "{media_html}"
             "<code>{path}</code>"
             "</a>".format(
                 href=escape(str(item.get("href", "") or "#"), quote=True),
+                mini_type=escape(mini_type),
                 updated=escape(str(item.get("updated", "") or "n/a")),
                 title=escape(str(item.get("title", "Untitled"))),
                 summary=escape(str(item.get("summary", "") or "(no summary yet)")),
+                detail_html=detail_html,
+                quality_html=quality_html,
+                capture_html=capture_html,
+                reason_html=reason_html,
+                media_html=media_html,
                 path=escape(str(item.get("path", "") or "")),
             )
         )
     return "\n".join(cards)
+
+
+def _render_inbox_review_cards(items: list[dict], inbox_dir: Path, root: Path) -> str:
+    cards: list[str] = []
+    for item in items:
+        normalized_target = root / str(item.get("path", ""))
+        normalized_href = Path(os.path.relpath(normalized_target, start=inbox_dir)).as_posix()
+        metadata_path = str(item.get("metadata_path", "") or "")
+        metadata_target = root / metadata_path if metadata_path else None
+        metadata_href = ""
+        if metadata_target is not None and metadata_target.exists():
+            metadata_href = Path(os.path.relpath(metadata_target, start=inbox_dir)).as_posix()
+        meta_rows: list[str] = []
+        for label, value in [
+            ("Adapter", str(item.get("adapter", "") or "")),
+            ("Mode", str(item.get("capture_mode", "") or "")),
+            ("State", str(item.get("capture_state", "") or "")),
+            ("Reason", str(item.get("capture_reason", "") or "")),
+            ("Media", str(item.get("media_status", "") or "")),
+            ("Source", str(item.get("site_name", "") or "")),
+            ("Author", str(item.get("author", "") or "")),
+            ("Published", str(item.get("publish_date", "") or "")),
+            ("Quality", str(item.get("quality_status", "") or "")),
+        ]:
+            if value:
+                meta_rows.append(
+                    "<span class='fact'><strong>{label}</strong>{value}</span>".format(
+                        label=escape(label + ": "),
+                        value=escape(value),
+                    )
+                )
+        attempts = int(item.get("capture_attempts", 0) or 0)
+        elapsed = str(item.get("capture_elapsed_seconds", "") or "")
+        if attempts:
+            meta_rows.append(
+                "<span class='fact'><strong>Attempts: </strong>{value}</span>".format(value=escape(str(attempts)))
+            )
+        if elapsed:
+            meta_rows.append(
+                "<span class='fact'><strong>Elapsed: </strong>{value}s</span>".format(value=escape(elapsed))
+            )
+        media_count = int(item.get("media_count", 0) or 0)
+        localized_media_count = int(item.get("localized_media_count", 0) or 0)
+        if media_count:
+            meta_rows.append(
+                "<span class='fact'><strong>Media files: </strong>{value}</span>".format(
+                    value=escape(f"{localized_media_count}/{media_count}")
+                )
+            )
+        media_dir = str(item.get("media_dir", "") or "")
+        if media_dir:
+            meta_rows.append(
+                "<span class='fact'><strong>Media dir: </strong>{value}</span>".format(value=escape(media_dir))
+            )
+        source_url = str(item.get("source_url", "") or "")
+        if source_url:
+            meta_rows.append(
+                "<a class='fact fact-link' href='{href}' target='_blank' rel='noopener'><strong>URL: </strong>{value}</a>".format(
+                    href=escape(source_url, quote=True),
+                    value=escape(source_url),
+                )
+            )
+        cards.append(
+            "<article class='card'>"
+            "<div class='meta'><span class='tag'>{tag}</span><span>{updated}</span></div>"
+            "<h3>{title}</h3>"
+            "<p>{summary}</p>"
+            "<div class='facts'>{facts}</div>"
+            "<div class='path'><code>{path}</code></div>"
+            "<div class='quality-note'>{capture_reason}</div>"
+            "<div class='quality-note'>{review_hint}</div>"
+            "<div class='quality-note'>{quality_reason}</div>"
+            "<div class='actions'>"
+            "<a href='{normalized_href}' target='_blank' rel='noopener'>Open normalized note</a>"
+            "<a href='../index.html' target='_blank' rel='noopener'>Open workspace home</a>"
+            "{metadata_link}"
+            "</div>"
+            "<div class='command-label'>Next ingest command</div>"
+            "<pre>{command}</pre>"
+            "</article>".format(
+                tag=escape(str(item.get("adapter", "") or item.get("kind", "") or "inbox")),
+                updated=escape(str(item.get("updated", "") or "n/a")),
+                title=escape(str(item.get("title", "Untitled"))),
+                summary=escape(str(item.get("summary", "") or "(no summary yet)")),
+                facts="".join(meta_rows),
+                path=escape(str(item.get("path", "") or "")),
+                capture_reason=escape(str(item.get("capture_state_reason", "") or "")),
+                review_hint=escape(str(item.get("review_hint", "") or "")),
+                quality_reason=escape(str(item.get("quality_reason", "") or "")),
+                normalized_href=escape(normalized_href, quote=True),
+                metadata_link=(
+                    "<a href='{href}' target='_blank' rel='noopener'>Open metadata</a>".format(
+                        href=escape(metadata_href, quote=True)
+                    )
+                    if metadata_href
+                    else ""
+                ),
+                command=escape(str(item.get("ingest_command", "") or "")),
+            )
+        )
+    return "\n".join(cards)
+
+
+def _render_inbox_review_section(
+    *,
+    anchor: str,
+    title: str,
+    description: str,
+    items: list[dict],
+    inbox_dir: Path,
+    root: Path,
+    empty_text: str,
+) -> str:
+    cards_html = _render_inbox_review_cards(items, inbox_dir, root) if items else "<div class='empty'>{}</div>".format(escape(empty_text))
+    commands = [str(item.get("ingest_command", "") or "") for item in items[:3] if str(item.get("ingest_command", "") or "")]
+    command_html = _render_command_list(commands, "当前分组还没有推荐命令。")
+    return (
+        "<section class='group' id='{anchor}'>"
+        "<div class='group-head'>"
+        "<div><h2>{title}</h2><p>{description}</p></div>"
+        "<span class='badge'>条目 {count}</span>"
+        "</div>"
+        "<div class='group-commands'>"
+        "<div class='command-label'>建议优先执行的下一步命令</div>"
+        "{commands}"
+        "</div>"
+        "<div class='cards'>{cards}</div>"
+        "</section>"
+    ).format(
+        anchor=escape(anchor, quote=True),
+        title=escape(title),
+        description=escape(description),
+        count=escape(str(len(items))),
+        commands=command_html,
+        cards=cards_html,
+    )
 
 
 def _recent_pages(pages: list[dict], limit: int = 4) -> list[dict]:
@@ -379,6 +683,14 @@ def _recommended_actions(
     inbox_items: list[dict],
 ) -> list[dict]:
     actions: list[dict] = []
+    ready_items = [item for item in inbox_items if str(item.get("quality_status", "") or "") == "ready"]
+    if ready_items:
+        actions.append({
+            "label": "Ingest",
+            "title": "优先处理 Ready Inbox",
+            "summary": "当前有 {} 条可直接继续复核并 ingest 的 inbox 条目，建议先看最上面的 ready 分组。".format(len(ready_items)),
+            "href": "inbox/index.html#ready" if inbox_page_exists else str(ready_items[0].get("href", "") or "#"),
+        })
     if inbox_count:
         actions.append({
             "label": "Review",
@@ -456,7 +768,10 @@ def write_output_home(root: Path) -> Path:
     graph_insights = graph_data.get("insights", {}) if isinstance(graph_data.get("insights"), dict) else {}
     ready_outputs = int(viewer_path.exists()) + int(graph_path.exists()) + int(inbox_path.exists())
     pages = viewer_data.get("pages", []) if isinstance(viewer_data.get("pages"), list) else []
-    inbox_count, inbox_items = _recent_inbox_items(root)
+    all_inbox_items = collect_inbox_items(root)
+    inbox_count = len(all_inbox_items)
+    inbox_items = all_inbox_items[:4]
+    inbox_summary = _inbox_quality_summary(all_inbox_items)
     recent_pages = _recent_pages(pages)
     generated_pages = _generated_pages(pages)
     featured_pages = _featured_pages(pages)
@@ -492,6 +807,7 @@ def write_output_home(root: Path) -> Path:
     for label, value in [
         ("成果页", ready_outputs),
         ("Inbox", inbox_count),
+        ("Ready", inbox_summary.get("ready", 0)),
         ("页面数", page_count),
         ("图节点", node_count),
         ("图关系", edge_count),
@@ -514,7 +830,7 @@ def write_output_home(root: Path) -> Path:
             recent_pages=recent_pages,
             inbox_page_exists=inbox_path.exists(),
             inbox_count=inbox_count,
-            inbox_items=inbox_items,
+            inbox_items=all_inbox_items,
         ),
         "当前还没有可推荐的下一步动作。",
     )
@@ -720,6 +1036,31 @@ def write_output_home(root: Path) -> Path:
       display: block;
       margin-bottom: 6px;
     }}
+    .quality {{
+      display: inline-block;
+      margin-top: 8px;
+      border-radius: 999px;
+      padding: 4px 8px;
+      font-size: 0.82rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }}
+    .quality-ready {{
+      background: rgba(47, 163, 91, 0.16);
+      color: #8de2a7;
+    }}
+    .quality-review {{
+      background: rgba(242, 166, 43, 0.16);
+      color: #ffd08a;
+    }}
+    .quality-weak {{
+      background: rgba(214, 77, 77, 0.16);
+      color: #ff9f9f;
+    }}
+    .quality-media {{
+      background: rgba(104, 114, 255, 0.16);
+      color: #b9c0ff;
+    }}
     .mini-card span {{
       display: block;
       color: var(--muted);
@@ -922,34 +1263,40 @@ def write_inbox_review(root: Path) -> Path:
     inbox_dir = output_dir / "inbox"
     inbox_path = inbox_dir / "index.html"
     items = collect_inbox_items(root)
-
-    cards: list[str] = []
-    for item in items:
-        normalized_target = root / str(item.get("path", ""))
-        normalized_href = Path(os.path.relpath(normalized_target, start=inbox_dir)).as_posix()
-        cards.append(
-            "<article class='card'>"
-            "<div class='meta'><span class='tag'>inbox</span><span>{updated}</span></div>"
-            "<h2>{title}</h2>"
-            "<p>{summary}</p>"
-            "<div class='path'><code>{path}</code></div>"
-            "<div class='actions'>"
-            "<a href='{normalized_href}' target='_blank' rel='noopener'>Open normalized note</a>"
-            "<a href='../index.html' target='_blank' rel='noopener'>Open workspace home</a>"
-            "</div>"
-            "<div class='command-label'>Next ingest command</div>"
-            "<pre>{command}</pre>"
-            "</article>".format(
-                updated=escape(str(item.get("updated", "") or "n/a")),
-                title=escape(str(item.get("title", "Untitled"))),
-                summary=escape(str(item.get("summary", "") or "(no summary yet)")),
-                path=escape(str(item.get("path", "") or "")),
-                normalized_href=escape(normalized_href, quote=True),
-                command=escape(str(item.get("ingest_command", "") or "")),
-            )
-        )
-
-    cards_html = "\n".join(cards) if cards else "<div class='empty'>还没有待处理的 inbox 条目。先运行 `python scripts/thinkwiki clip ...` 采集网页、文本或文件。</div>"
+    groups = _inbox_groups(items)
+    summary = _inbox_quality_summary(items)
+    priority_items = _priority_inbox_items(items)
+    priority_commands = [str(item.get("ingest_command", "") or "") for item in priority_items if str(item.get("ingest_command", "") or "")]
+    priority_html = _render_inbox_list(priority_items, "还没有可优先处理的 inbox 条目。")
+    sections_html = "\n".join([
+        _render_inbox_review_section(
+            anchor="ready",
+            title="Ready To Ingest",
+            description="这一组的网页元数据和正文完整度都比较好，通常适合先做最终复核，然后正式 ingest。",
+            items=groups.get("ready", []),
+            inbox_dir=inbox_dir,
+            root=root,
+            empty_text="当前还没有可直接 ingest 的 ready 条目。",
+        ),
+        _render_inbox_review_section(
+            anchor="review",
+            title="Needs Review",
+            description="这一组通常已经可读，但还建议核对来源、作者、发布时间或页面主内容是否完整。",
+            items=groups.get("review", []),
+            inbox_dir=inbox_dir,
+            root=root,
+            empty_text="当前没有处于 review 状态的条目。",
+        ),
+        _render_inbox_review_section(
+            anchor="weak",
+            title="Weak Captures",
+            description="这一组优先做人工检查，确认是不是抓到了 loading 页、摘要页或信息过少的内容。",
+            items=groups.get("weak", []),
+            inbox_dir=inbox_dir,
+            root=root,
+            empty_text="当前没有 weak 条目。",
+        ),
+    ]) if items else "<div class='empty'>还没有待处理的 inbox 条目。先运行 `python scripts/thinkwiki clip ...` 采集网页、文本或文件。</div>"
     html = """<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -999,6 +1346,12 @@ def write_inbox_review(root: Path) -> Path:
       margin-bottom: 18px;
       max-width: 70ch;
     }}
+    .hero-grid {{
+      display: grid;
+      grid-template-columns: minmax(0, 1.2fr) minmax(300px, 0.8fr);
+      gap: 16px;
+      align-items: start;
+    }}
     .badges {{
       display: flex;
       gap: 10px;
@@ -1016,11 +1369,65 @@ def write_inbox_review(root: Path) -> Path:
       grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
       gap: 14px;
     }}
+    .panel {{
+      border: 1px solid var(--border);
+      background: rgba(255,255,255,0.03);
+      border-radius: 18px;
+      padding: 18px;
+    }}
+    .summary-grid {{
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      margin: 18px 0 0;
+    }}
+    .summary-stat {{
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 14px;
+      background: rgba(255,255,255,0.03);
+    }}
+    .summary-stat strong {{
+      display: block;
+      font-size: 1.4rem;
+      margin-bottom: 6px;
+    }}
+    .summary-stat span {{
+      color: var(--muted);
+    }}
+    .group {{
+      margin-top: 18px;
+      border: 1px solid var(--border);
+      background: rgba(9, 13, 28, 0.78);
+      border-radius: 22px;
+      padding: 20px;
+    }}
+    .group-head {{
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: start;
+      margin-bottom: 16px;
+    }}
+    .group-head p {{
+      color: var(--muted);
+      margin-bottom: 0;
+      max-width: 70ch;
+    }}
+    .group-commands {{
+      margin-bottom: 16px;
+    }}
+    .command-pre {{
+      margin-bottom: 10px;
+    }}
     .card {{
       border: 1px solid var(--border);
       background: rgba(255,255,255,0.03);
       border-radius: 18px;
       padding: 18px;
+    }}
+    .card h3 {{
+      margin-top: 0;
     }}
     .meta {{
       display: flex;
@@ -1039,8 +1446,37 @@ def write_inbox_review(root: Path) -> Path:
       color: var(--muted);
       line-height: 1.55;
     }}
+    .facts {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 14px;
+    }}
+    .fact {{
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 6px 10px;
+      color: var(--muted);
+      background: rgba(255,255,255,0.02);
+      font-size: 0.9rem;
+      text-decoration: none;
+    }}
+    .fact strong {{
+      color: var(--text);
+    }}
+    .fact-link {{
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }}
     .path {{
       margin: 14px 0;
+    }}
+    .quality-note {{
+      color: var(--muted);
+      line-height: 1.5;
+      margin-bottom: 14px;
     }}
     .actions {{
       display: flex;
@@ -1078,29 +1514,65 @@ def write_inbox_review(root: Path) -> Path:
       color: var(--muted);
       background: rgba(255,255,255,0.02);
     }}
+    @media (max-width: 900px) {{
+      .hero-grid {{
+        grid-template-columns: 1fr;
+      }}
+      .summary-grid {{
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }}
+    }}
+    @media (max-width: 640px) {{
+      .summary-grid {{
+        grid-template-columns: 1fr;
+      }}
+      .group-head {{
+        flex-direction: column;
+      }}
+    }}
   </style>
 </head>
 <body>
   <main class="shell">
     <section class="hero">
       <div class="eyebrow">Inbox Review</div>
-      <h1>{wiki_title}</h1>
-      <p class="lead">这里集中显示已经 clip 到 inbox、但还没有正式 ingest 的内容。你可以逐条复核清洗后的 Markdown，再直接复制下一步命令把它送进 wiki。</p>
-      <div class="badges">
-        <span class="badge">待处理条目 {count}</span>
-        <span class="badge"><a href="../index.html" target="_blank" rel="noopener">Open workspace home</a></span>
+      <div class="hero-grid">
+        <div>
+          <h1>{wiki_title}</h1>
+          <p class="lead">这里集中显示已经 clip 到 inbox、但还没有正式 ingest 的内容。现在它会按 `ready / review / weak` 分组，帮助你先处理最值得正式入库的条目，再回头处理需要人工检查的内容。</p>
+          <div class="badges">
+            <span class="badge">待处理条目 {count}</span>
+            <span class="badge"><a href="../index.html" target="_blank" rel="noopener">Open workspace home</a></span>
+          </div>
+          <div class="summary-grid">
+            <div class="summary-stat"><strong>{count}</strong><span>Total</span></div>
+            <div class="summary-stat"><strong>{ready_count}</strong><span>Ready</span></div>
+            <div class="summary-stat"><strong>{review_count}</strong><span>Review</span></div>
+            <div class="summary-stat"><strong>{weak_count}</strong><span>Weak</span></div>
+          </div>
+        </div>
+        <div class="panel">
+          <h2>Priority Queue</h2>
+          <p>这里先列出最值得优先处理的条目。通常顺序是 ready -> review -> weak。</p>
+          {priority_items}
+          <div class="command-label" style="margin-top: 14px;">优先建议命令</div>
+          {priority_commands}
+        </div>
       </div>
     </section>
-    <section class="cards">
-      {cards}
-    </section>
+    {sections}
   </main>
 </body>
 </html>
 """.format(
         wiki_title=escape(_first_markdown_heading(root / "index.md") or root.name),
         count=escape(str(len(items))),
-        cards=cards_html,
+        ready_count=escape(str(summary.get("ready", 0))),
+        review_count=escape(str(summary.get("review", 0))),
+        weak_count=escape(str(summary.get("weak", 0))),
+        priority_items=priority_html,
+        priority_commands=_render_command_list(priority_commands[:3], "当前还没有可推荐的 ingest 命令。"),
+        sections=sections_html,
     )
     write_text(inbox_path, html)
     return inbox_path

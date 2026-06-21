@@ -1,6 +1,19 @@
 # Changelog
 
-## Unreleased
+## v1.4.0
+### Added
+- Added structured sidecar metadata for web clips in `normalized/inbox/*.json`, including adapter, site name, author, publish date, and source URL.
+- Added explicit `clip --adapter auto|wechat|generic` selection so the inbox capture flow can evolve toward adapter-based web extraction.
+- Added inbox extraction quality states (`ready`, `review`, `weak`) so the review page can highlight which clips are safe to ingest and which still need manual checking.
+- Added `clip --mode auto|wait` so webpage capture can retry for a short window before writing inbox artifacts, and record whether the wait completed or timed out.
+- Added `clip --media ask|always|never` so webpage images can stay remote, be marked for later review, or be localized into `normalized/assets/inbox/...` during capture.
+- Added structured capture reasons such as `loading_placeholder`, `body_too_short`, and `metadata_sparse`, so inbox review can explain why a web clip still needs attention.
+
+### Changed
+- Updated `output/inbox/index.html` and the workspace inbox cards so clipped webpages now surface adapter, source, author, publish date, and metadata links during review.
+- Updated the WeChat extraction path so common embedded code blocks are normalized before Markdown conversion, making technical articles easier to preserve.
+- Updated `output/inbox/index.html` into a grouped review console with `Ready To Ingest`, `Needs Review`, and `Weak Captures` sections, plus priority commands for the next ingest steps.
+- Updated `output/index.html` so the workspace home now highlights ready inbox items first and links directly to the ready review section.
 
 ## v1.3.0
 ### Added

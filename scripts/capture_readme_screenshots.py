@@ -31,6 +31,11 @@ def screenshot_specs(repo_root: Path, demo_root: Path, assets_dir: Path) -> list
             "viewport": {"width": 1440, "height": 1180},
         },
         {
+            "url": (demo_output / "inbox" / "index.html").as_uri() + "#ready",
+            "output": (repo_root / assets_dir / "inbox-preview.png").resolve(),
+            "viewport": {"width": 1440, "height": 1600},
+        },
+        {
             "url": (demo_output / "viewer" / "index.html").as_uri() + "#page=wiki%2Fconcepts%2Fai-native-team.md",
             "output": (repo_root / assets_dir / "viewer-preview.png").resolve(),
             "viewport": {"width": 1440, "height": 1080},
